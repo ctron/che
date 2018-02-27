@@ -10,16 +10,21 @@
  */
 package org.eclipse.che.multiuser.machine.authentication.server;
 
-import static org.eclipse.che.commons.lang.NameGenerator.generate;
+import static io.jsonwebtoken.SignatureAlgorithm.RS512;
 
 import com.google.common.collect.HashBasedTable;
 import com.google.common.collect.Table;
+import com.google.gson.Gson;
+import io.jsonwebtoken.Jwts;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import javax.inject.Inject;
 import javax.inject.Singleton;
-import org.eclipse.che.api.core.NotFoundException;
+import org.eclipse.che.commons.env.EnvironmentContext;
+import org.eclipse.che.commons.subject.Subject;
+import org.eclipse.che.commons.subject.SubjectImpl;
 
 /**
  * Table-based storage of machine security tokens. Table rows is workspace id's, columns - user
@@ -31,8 +36,20 @@ import org.eclipse.che.api.core.NotFoundException;
 @Singleton
 public class MachineTokenRegistry {
 
-  private final Table<String, String, String> tokens = HashBasedTable.create();
-  private final ReadWriteLock lock = new ReentrantReadWriteLock();
+  public static final String MACHINE_TOKEN_KIND = "machine_token";
+
+  private static final Gson GSON = new Gson();
+
+  private final SignatureKeyManager signatureKeyManager;
+  private final Table<String, String, String> tokens;
+  private final ReadWriteLock lock;
+
+  @Inject
+  public MachineTokenRegistry(SignatureKeyManager signatureKeyManager) {
+    this.signatureKeyManager = signatureKeyManager;
+    this.tokens = HashBasedTable.create();
+    this.lock = new ReentrantReadWriteLock();
+  }
 
   /**
    * Gets or creates machine security token for user and workspace. For running workspace, there is
@@ -49,32 +66,27 @@ public class MachineTokenRegistry {
       String token = wsRow.get(userId);
 
       if (token == null) {
-        token = generate("machine", 128);
+        final SignatureKeyPair keyPair = signatureKeyManager.getKeyPair();
+        final Subject subject = EnvironmentContext.getCurrent().getSubject();
+        final SubjectImpl subjectWithoutToken =
+            new SubjectImpl(
+                subject.getUserName(), subject.getUserId(), null, subject.isTemporary());
+        token =
+            Jwts.builder()
+                .setPayload(GSON.toJson(subjectWithoutToken))
+                .setHeader(
+                    new HashMap<String, Object>() {
+                      {
+                        put("kind", MACHINE_TOKEN_KIND);
+                      }
+                    })
+                .signWith(RS512, keyPair.getPrivate())
+                .compact();
         tokens.put(workspaceId, userId, token);
       }
       return token;
     } finally {
       lock.writeLock().unlock();
-    }
-  }
-
-  /**
-   * Gets userId by machine token
-   *
-   * @return user identifier
-   * @throws NotFoundException when no token exists for given user and workspace
-   */
-  public String getUserId(String token) throws NotFoundException {
-    lock.readLock().lock();
-    try {
-      for (Table.Cell<String, String, String> tokenCell : tokens.cellSet()) {
-        if (tokenCell.getValue().equals(token)) {
-          return tokenCell.getColumnKey();
-        }
-      }
-      throw new NotFoundException("User not found for token " + token);
-    } finally {
-      lock.readLock().unlock();
     }
   }
 

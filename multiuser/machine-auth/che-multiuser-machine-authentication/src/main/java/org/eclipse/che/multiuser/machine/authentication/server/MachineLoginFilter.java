@@ -10,8 +10,13 @@
  */
 package org.eclipse.che.multiuser.machine.authentication.server;
 
-import static com.google.common.base.Strings.nullToEmpty;
+import static com.google.common.base.Strings.isNullOrEmpty;
+import static org.eclipse.che.multiuser.machine.authentication.server.MachineTokenRegistry.MACHINE_TOKEN_KIND;
 
+import com.google.gson.Gson;
+import io.jsonwebtoken.Jwt;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.SignatureException;
 import java.io.IOException;
 import java.security.Principal;
 import javax.inject.Inject;
@@ -24,59 +29,70 @@ import javax.servlet.ServletRequest;
 import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletRequestWrapper;
-import org.eclipse.che.api.core.NotFoundException;
-import org.eclipse.che.api.core.ServerException;
-import org.eclipse.che.api.core.model.user.User;
 import org.eclipse.che.api.user.server.UserManager;
 import org.eclipse.che.commons.auth.token.RequestTokenExtractor;
 import org.eclipse.che.commons.env.EnvironmentContext;
 import org.eclipse.che.commons.subject.Subject;
 import org.eclipse.che.commons.subject.SubjectImpl;
-import org.eclipse.che.multiuser.api.permission.server.AuthorizedSubject;
 import org.eclipse.che.multiuser.api.permission.server.PermissionChecker;
 
-/** @author Max Shaposhnik (mshaposhnik@codenvy.com) */
+/**
+ * Handles requests that comes from machines with specific machine token.
+ *
+ * @author Max Shaposhnik (mshaposhnik@codenvy.com)
+ */
 @Singleton
 public class MachineLoginFilter implements Filter {
 
-  @Inject private RequestTokenExtractor tokenExtractor;
+  private static final Gson GSON = new Gson();
 
-  @Inject private MachineTokenRegistry machineTokenRegistry;
+  private final RequestTokenExtractor tokenExtractor;
+  private final MachineTokenRegistry machineTokenRegistry;
+  private final UserManager userManager;
+  private final SignatureKeyManager keyManager;
+  private final PermissionChecker permissionChecker;
 
-  @Inject private UserManager userManager;
-
-  @Inject private PermissionChecker permissionChecker;
+  @Inject
+  public MachineLoginFilter(
+      RequestTokenExtractor tokenExtractor,
+      MachineTokenRegistry machineTokenRegistry,
+      UserManager userManager,
+      SignatureKeyManager keyManager,
+      PermissionChecker permissionChecker) {
+    this.tokenExtractor = tokenExtractor;
+    this.machineTokenRegistry = machineTokenRegistry;
+    this.userManager = userManager;
+    this.keyManager = keyManager;
+    this.permissionChecker = permissionChecker;
+  }
 
   @Override
   public void init(FilterConfig filterConfig) throws ServletException {}
 
   @Override
-  public void doFilter(
-      ServletRequest servletRequest, ServletResponse servletResponse, FilterChain filterChain)
+  public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
       throws IOException, ServletException {
-    final HttpServletRequest httpRequest = (HttpServletRequest) servletRequest;
-    if (httpRequest.getScheme().startsWith("ws")
-        || !nullToEmpty(tokenExtractor.getToken(httpRequest)).startsWith("machine")) {
-      filterChain.doFilter(servletRequest, servletResponse);
+    final HttpServletRequest httpRequest = (HttpServletRequest) request;
+    final String token = tokenExtractor.getToken(httpRequest);
+
+    if (httpRequest.getScheme().startsWith("ws") || isNullOrEmpty(token)) {
+      chain.doFilter(request, response);
       return;
-    } else {
-      String tokenString;
-      User user;
-      try {
-        tokenString = tokenExtractor.getToken(httpRequest);
-        String userId = machineTokenRegistry.getUserId(tokenString);
-        user = userManager.getById(userId);
-      } catch (NotFoundException | ServerException e) {
-        throw new ServletException("Cannot find user by machine token.");
-      }
+    }
 
-      final Subject subject =
-          new AuthorizedSubject(
-              new SubjectImpl(user.getName(), user.getId(), tokenString, false), permissionChecker);
-
+    final Jwt jwt;
+    try {
+      jwt = Jwts.parser().setSigningKey(keyManager.getKeyPair().getPublic()).parse(token);
+    } catch (SignatureException ex) {
+      // not machine request
+      chain.doFilter(request, response);
+      return;
+    }
+    if (MACHINE_TOKEN_KIND.equals(jwt.getHeader().get("kind"))) {
+      final SubjectImpl subject = GSON.fromJson(jwt.getBody().toString(), SubjectImpl.class);
       try {
         EnvironmentContext.getCurrent().setSubject(subject);
-        filterChain.doFilter(addUserInRequest(httpRequest, subject), servletResponse);
+        chain.doFilter(addUserInRequest(httpRequest, subject), response);
       } finally {
         EnvironmentContext.reset();
       }

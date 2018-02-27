@@ -10,6 +10,7 @@
  */
 package org.eclipse.che.multiuser.machine.authentication.server;
 
+import static org.mockito.Mockito.mock;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 
@@ -26,7 +27,7 @@ public class MachineTokenRegistryTest {
 
   @Test
   public void removeTokensShouldReturnUserToTokenMap() throws Exception {
-    final MachineTokenRegistry registry = new MachineTokenRegistry();
+    final MachineTokenRegistry registry = new MachineTokenRegistry(mock(SignatureKeyManager.class));
 
     final Map<String, String> userToToken = new HashMap<>();
     userToToken.put("user1", registry.getOrCreateToken("user1", "workspace123"));

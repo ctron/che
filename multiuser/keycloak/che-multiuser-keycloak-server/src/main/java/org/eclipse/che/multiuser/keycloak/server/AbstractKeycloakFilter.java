@@ -10,10 +10,15 @@
  */
 package org.eclipse.che.multiuser.keycloak.server;
 
+import io.jsonwebtoken.Jwt;
+import io.jsonwebtoken.Jwts;
+import java.security.PublicKey;
+import javax.inject.Inject;
 import javax.servlet.Filter;
 import javax.servlet.FilterConfig;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
+import org.eclipse.che.multiuser.machine.authentication.server.SignatureKeyManager;
 
 /**
  * Base abstract class for the Keycloak-related servlet filters.
@@ -23,8 +28,20 @@ import javax.servlet.http.HttpServletRequest;
  */
 public abstract class AbstractKeycloakFilter implements Filter {
 
+  private static final String MACHINE_TOKEN_KIND = "machine_token";
+
+  @Inject private SignatureKeyManager signatureKeyManager;
+
   protected boolean shouldSkipAuthentication(HttpServletRequest request, String token) {
-    return request.getScheme().startsWith("ws") || (token != null && token.startsWith("machine"));
+    try {
+      final PublicKey signatureKey = signatureKeyManager.getKeyPair().getPublic();
+      final Jwt jwt = Jwts.parser().setSigningKey(signatureKey).parse(token);
+      return request.getScheme().startsWith("ws")
+          || (token != null && MACHINE_TOKEN_KIND.equals(jwt.getHeader().get("kind")));
+    } catch (RuntimeException ex) {
+      // give token is not signed by particular signature key so it must be checked in another way
+      return false;
+    }
   }
 
   @Override
